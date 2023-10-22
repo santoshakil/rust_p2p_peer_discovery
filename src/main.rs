@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use libp2p::{
     core::{upgrade, Transport},
     futures::StreamExt,
     mdns, noise,
-    swarm::{SwarmBuilder, SwarmEvent},
+    swarm::SwarmEvent,
     tcp,
 };
 
@@ -36,13 +38,10 @@ async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let event = swarm.select_next_some().await;
         match event {
-            SwarmEvent::Behaviour(AppBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+            SwarmEvent::Behaviour(mdns::Event::Discovered(list)) => {
                 for (peer, addr) in list {
                     println!("Discovered peer: {} with address {}", peer, addr);
                 }
-            }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                println!("Connection established with {}", peer_id);
             }
             SwarmEvent::NewListenAddr { .. } => {}
             _ => {
@@ -52,7 +51,7 @@ async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn build_swarm() -> Result<libp2p::Swarm<AppBehaviour>, Box<dyn std::error::Error>> {
+fn build_swarm() -> Result<libp2p::Swarm<mdns::tokio::Behaviour>, Box<dyn std::error::Error>> {
     let id_keys = libp2p::identity::Keypair::generate_ed25519();
     let local_peer_id = libp2p::PeerId::from(id_keys.public());
     println!("Local peer id: {local_peer_id}");
@@ -61,14 +60,9 @@ fn build_swarm() -> Result<libp2p::Swarm<AppBehaviour>, Box<dyn std::error::Erro
         .authenticate(noise::Config::new(&id_keys)?)
         .multiplex(libp2p::yamux::Config::default())
         .boxed();
-    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-    let keep_alive = libp2p::swarm::keep_alive::Behaviour::default();
-    let behaviour = AppBehaviour { mdns, keep_alive };
-    Ok(SwarmBuilder::with_tokio_executor(trns, behaviour, local_peer_id).build())
-}
-
-#[derive(libp2p::swarm::NetworkBehaviour)]
-struct AppBehaviour {
-    keep_alive: libp2p::swarm::keep_alive::Behaviour,
-    mdns: mdns::tokio::Behaviour,
+    let behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+    let config = libp2p::swarm::Config::with_tokio_executor()
+        .with_idle_connection_timeout(Duration::from_secs(u64::MAX));
+    let swarm = libp2p::Swarm::new(trns, behaviour, local_peer_id, config);
+    Ok(swarm)
 }
