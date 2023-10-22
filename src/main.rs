@@ -9,13 +9,15 @@ use libp2p::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let thread1 = tokio::task::spawn(async {
-        if let Err(e) = start_peer().await {
+        if let Err(e) = start_peer(true).await {
             eprintln!("Error1: {}", e);
         }
     });
 
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
     let thread2 = tokio::task::spawn(async {
-        if let Err(e) = start_peer().await {
+        if let Err(e) = start_peer(false).await {
             eprintln!("Error2: {}", e);
         }
     });
@@ -25,9 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn start_peer() -> Result<(), Box<dyn std::error::Error>> {
+async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut swarm = build_swarm()?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    if listen {
+        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    }
 
     loop {
         let event = swarm.select_next_some().await;
