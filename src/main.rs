@@ -1,221 +1,61 @@
-use async_std::io;
-use futures::{future::Either, AsyncBufReadExt, SinkExt, StreamExt};
 use libp2p::{
-    core::{muxing::StreamMuxerBox, transport::OrTransport, upgrade},
-    gossipsub, identity, mdns, noise,
-    swarm::NetworkBehaviour,
+    core::{upgrade, Transport},
+    futures::StreamExt,
+    mdns, noise,
     swarm::{SwarmBuilder, SwarmEvent},
-    tcp, yamux, PeerId, Transport,
+    tcp,
 };
-use libp2p_quic as quic;
-use std::{collections::hash_map::DefaultHasher, net::SocketAddr};
-use std::{error::Error, thread};
-use std::{
-    hash::{Hash, Hasher},
-    str::FromStr,
-};
-use tokio::{
-    net::TcpListener,
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-};
-use tokio_tungstenite::tungstenite::Message;
-
-type ReqResType = libp2p_request_response::Event<GreetRequest, GreetResponse>;
-
-#[derive(NetworkBehaviour)]
-struct MyBehaviour {
-    gossipsub: gossipsub::Behaviour,
-    mdns: mdns::async_io::Behaviour,
-    reqres: libp2p::request_response::cbor::Behaviour<GreetRequest, GreetResponse>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct GreetRequest {
-    name: String,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct GreetResponse {
-    message: String,
-}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = get_addr();
-    let listener = TcpListener::bind(&addr).await?;
-    println!("WS Listening on: {}", addr);
-
-    let id_keys = identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(id_keys.public());
-    println!("Local peer id: {local_peer_id}");
-
-    let tcp_transport = tcp::async_io::Transport::new(tcp::Config::default().nodelay(true))
-        .upgrade(upgrade::Version::V1Lazy)
-        .authenticate(noise::Config::new(&id_keys).expect("signing libp2p-noise static keypair"))
-        .multiplex(yamux::Config::default())
-        .timeout(std::time::Duration::from_secs(10))
-        .boxed();
-    let quic_transport = quic::async_std::Transport::new(quic::Config::new(&id_keys));
-    let transport = OrTransport::new(quic_transport, tcp_transport)
-        .map(|either_output, _| match either_output {
-            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-        })
-        .boxed();
-
-    let message_id_fn = |message: &gossipsub::Message| {
-        let mut s = DefaultHasher::new();
-        message.data.hash(&mut s);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        let timestamp = now.as_secs() * 1000 + now.subsec_millis() as u64;
-        let timestamp = timestamp.to_be_bytes();
-        s.write(&timestamp);
-        gossipsub::MessageId::from(s.finish().to_string())
-    };
-
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .message_id_fn(message_id_fn)
-        .build()
-        .expect("Valid config");
-
-    let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(id_keys),
-        gossipsub_config,
-    )
-    .expect("Correct configuration");
-    let topic = gossipsub::IdentTopic::new("test-net");
-    gossipsub.subscribe(&topic)?;
-
-    let mut swarm = {
-        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-        let behaviour = MyBehaviour {
-            gossipsub,
-            mdns,
-            reqres: libp2p::request_response::cbor::Behaviour::<GreetRequest, GreetResponse>::new(
-                [(
-                    libp2p::StreamProtocol::new("/my-cbor-protocol"),
-                    libp2p_request_response::ProtocolSupport::Full,
-                )],
-                libp2p::request_response::Config::default(),
-            ),
-        };
-        SwarmBuilder::with_async_std_executor(transport, behaviour, local_peer_id).build()
-    };
-
-    let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
-
-    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    println!("Enter messages via STDIN and they will be sent to connected peers using Gossipsub");
-
-    let (sender_dr, mut receiver_dr) = unbounded_channel::<String>();
-    let (sender_rd, receiver_rd) = unbounded_channel::<String>();
-
-    _ = thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(ws_to_gossipsub(listener, addr, sender_dr, receiver_rd));
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let thread1 = tokio::task::spawn(async {
+        if let Err(e) = start_peer().await {
+            eprintln!("Error1: {}", e);
+        }
     });
 
+    let thread2 = tokio::task::spawn(async {
+        if let Err(e) = start_peer().await {
+            eprintln!("Error2: {}", e);
+        }
+    });
+
+    tokio::try_join!(thread1, thread2)?;
+
+    Ok(())
+}
+
+async fn start_peer() -> Result<(), Box<dyn std::error::Error>> {
+    let id_keys = libp2p::identity::Keypair::generate_ed25519();
+    let local_peer_id = libp2p::PeerId::from(id_keys.public());
+    println!("Local peer id: {local_peer_id}");
+
+    let noise_config = noise::Config::new(&id_keys)?;
+    let trns = tcp::tokio::Transport::default()
+        .upgrade(upgrade::Version::V1)
+        .authenticate(noise_config)
+        .multiplex(libp2p::yamux::Config::default())
+        .boxed();
+    let mut swarm = SwarmBuilder::with_tokio_executor(
+        trns,
+        mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?,
+        local_peer_id,
+    )
+    .build();
+
+    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
+
     loop {
-        tokio::select! {
-            line = stdin.select_next_some() => {
-                // if let Err(e) = swarm
-                //     .behaviour_mut().gossipsub
-                //     .publish(topic.clone(), line.expect("Stdin not to close").as_bytes()) {
-                //     println!("Publish error: {e:?}");
-                // }
-                let peer = String::from("12D3KooWJw3Yz2h3ARNzNGiQqP1EcBKDtftxxL8p2rDAkRHf66hc");
-                let peer_id = PeerId::from_str(&peer).unwrap();
-                let req = GreetRequest { name: line.expect("Stdin not to close") };
-                swarm.behaviour_mut().reqres.send_request(&peer_id, req);
-            },
-            event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        let req = GreetRequest { name: "Hello!!!".to_string() };
-                        swarm.behaviour_mut().reqres.send_request(&peer_id, req);
-                    }
-                },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discover peer has expired: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                    }
-                },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source: peer_id,
-                    message_id: id,
-                    message,
-                })) => {
-                    let msg = String::from_utf8_lossy(&message.data);
-                    println!(
-                        "Got message: '{}' with id: {id} from peer: {peer_id}",
-                        msg
-                    );
-                    sender_rd.send(msg.to_string()).expect("Failed to send msg");
-                },
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
-                },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Reqres(v)) => {
-                    match v {
-                        ReqResType::Message {peer, message } => {
-                            println!("Got message from peer: {} with message: {:?}", peer, message);
-                        },
-                        _ => {}
-                    }
-                },
-                _ => {},
-            },
-            msg = receiver_dr.recv() => {
-                if let Some(msg) = msg{
-                    swarm.behaviour_mut().gossipsub.publish(topic.clone(), msg.as_bytes()).expect("Failed to publish msg");
+        let event = swarm.select_next_some().await;
+        match event {
+            SwarmEvent::Behaviour(mdns::Event::Discovered(list)) => {
+                for (peer, _) in list {
+                    println!("Discovered peer: {:?}", peer);
                 }
             }
-        }
-    }
-}
-
-async fn ws_to_gossipsub(
-    listener: TcpListener,
-    addr: String,
-    sender_dr: UnboundedSender<String>,
-    mut receiver_rd: UnboundedReceiver<String>,
-) {
-    let (stream, _) = listener.accept().await.unwrap();
-    println!("Incoming TCP connection from: {}", addr);
-    let stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .expect("Error during the websocket handshake occurred");
-    println!("WebSocket connection established: {}", addr);
-    let (mut write, mut read) = stream.split();
-    loop {
-        tokio::select! {
-            Some(msg) = read.next() => {
-                let msg = msg.expect("Failed to get msg");
-                println!("Received a message from {}: {}", addr, msg);
-                write.send(msg.clone()).await.expect("Failed to send msg");
-                sender_dr.send(msg.to_string()).expect("Failed to send msg");
-            }
-            Some(msg) = receiver_rd.recv() => {
-                let msg = Message::Text(msg);
-                write.send(msg.clone()).await.expect("Failed to send msg");
+            _ => {
+                eprintln!("Unhandled Swarm Event: {:?}", event);
             }
         }
     }
-}
-
-pub fn get_addr() -> String {
-    for port in 8080..=8090 {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        if std::net::TcpListener::bind(addr).is_ok() {
-            return addr.to_string();
-        }
-    }
-    return SocketAddr::from(([127, 0, 0, 1], 8080)).to_string();
 }
