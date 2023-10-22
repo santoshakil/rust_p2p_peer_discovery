@@ -56,7 +56,7 @@ fn build_swarm() -> Result<libp2p::Swarm<mdns::tokio::Behaviour>, Box<dyn std::e
     let local_peer_id = libp2p::PeerId::from(id_keys.public());
     println!("Local peer id: {local_peer_id}");
     let trns = tcp::tokio::Transport::default()
-        .upgrade(upgrade::Version::V1)
+        .upgrade(upgrade::Version::V1Lazy)
         .authenticate(noise::Config::new(&id_keys)?)
         .multiplex(libp2p::yamux::Config::default())
         .boxed();
