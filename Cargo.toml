@@ -5,6 +5,7 @@ edition = "2021"
 
 
 [dependencies]
+crossbeam-channel = "0"
 tokio = { version = "1", features = ["full"] }
 libp2p = { version = "0", features = [
     "tokio",

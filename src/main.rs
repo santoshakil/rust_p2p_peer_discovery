@@ -14,22 +14,33 @@ struct AppBehaviour {
     reqres: libp2p::request_response::cbor::Behaviour<String, String>,
 }
 
-async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut swarm = build_swarm()?;
     if listen {
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     }
 
+    let (s, r) = crossbeam_channel::bounded(1);
+
     loop {
         let event = swarm.select_next_some().await;
+        let b = swarm.behaviour_mut();
         match event {
             SwarmEvent::Behaviour(AppBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer, addr) in list {
                     println!("\nDiscovered peer: {} with address {}", peer, addr);
-                    swarm
-                        .behaviour_mut()
-                        .reqres
-                        .send_request(&peer, "isMaster".to_string());
+                    let r = r.clone();
+                    _ = tokio::task::spawn(async move {
+                        loop {
+                            if let Ok(p) = r.recv() {
+                                if p == peer {
+                                    println!("\nMaster. Peer: {}, Address: {}", peer, addr);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    b.reqres.send_request(&peer, "master".to_string());
                 }
             }
             SwarmEvent::Behaviour(AppBehaviourEvent::Reqres(v)) => match v {
@@ -38,23 +49,21 @@ async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
                         request, channel, ..
                     } => {
                         println!("\nRequest from {:?}: {:?}", peer, request);
-                        if request == "isMaster" {
-                            _ = swarm
-                                .behaviour_mut()
-                                .reqres
-                                .send_response(channel, "true".to_string());
+                        if request == "master" {
+                            _ = b.reqres.send_response(channel, "true".to_string());
                         }
                     }
                     libp2p::request_response::Message::Response { response, .. } => {
                         println!("\nResponse from {:?}: {:?}", peer, response);
+                        if response == "true" {
+                            _ = s.send(peer);
+                        }
                     }
                 },
                 _ => {}
             },
             SwarmEvent::NewListenAddr { .. } => {}
-            _ => {
-                eprintln!("\n*** Unhandled Event ***\n{:?}\n", event);
-            }
+            _ => {}
         }
     }
 }
