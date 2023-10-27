@@ -14,9 +14,9 @@ struct AppBehaviour {
     reqres: libp2p::request_response::cbor::Behaviour<String, String>,
 }
 
-pub async fn start_peer(listen: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_peer(master: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut swarm = build_swarm()?;
-    if listen {
+    if master {
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     }
 
