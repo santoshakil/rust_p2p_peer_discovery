@@ -8,6 +8,9 @@ use libp2p::{
     tcp,
 };
 
+const MAX: Duration = Duration::from_secs(u64::MAX);
+const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(3);
+
 #[derive(NetworkBehaviour)]
 struct AppBehaviour {
     mdns: mdns::tokio::Behaviour,
@@ -77,8 +80,16 @@ fn build_swarm() -> Result<libp2p::Swarm<AppBehaviour>, Box<dyn std::error::Erro
         .authenticate(noise::Config::new(&id_keys)?)
         .multiplex(libp2p::yamux::Config::default())
         .boxed();
+    let mdns = libp2p::mdns::tokio::Behaviour::new(
+        libp2p::mdns::Config {
+            ttl: MAX,
+            query_interval: MDNS_QUERY_INTERVAL,
+            ..Default::default()
+        },
+        local_peer_id,
+    )?;
     let behaviour = AppBehaviour {
-        mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?,
+        mdns,
         reqres: libp2p::request_response::cbor::Behaviour::new(
             [(
                 libp2p::StreamProtocol::new("/reqres/cbor/1.0.0"),
